@@ -94,6 +94,7 @@ import random
 import shlex
 import ipaddress
 
+from sys import exit  # pylint: disable=redefined-builtin
 from time import sleep
 from itertools import chain, groupby
 from math import ceil
@@ -112,7 +113,7 @@ from mininet.term import cleanUpScreens, makeTerms
 from subprocess import Popen
 
 # Mininet version: should be consistent with README and LICENSE
-VERSION = "2.3.0d5"
+VERSION = "2.3.0"
 CONTAINERNET_VERSION = "3.0"
 
 # If an external SAP (Service Access Point) is made, it is deployed with this prefix in the name,
@@ -122,6 +123,7 @@ SAP_PREFIX = 'sap.'
 class Mininet( object ):
     "Network emulation with hosts spawned in network namespaces."
 
+    # pylint: disable=too-many-arguments
     def __init__( self, topo=None, switch=OVSKernelSwitch, host=Host,
                   controller=DefaultController, link=Link, intf=Intf,
                   build=True, xterms=False, cleanup=False, ipBase='10.0.0.0/8',
@@ -144,7 +146,9 @@ class Mininet( object ):
            autoStaticArp: set all-pairs static MAC addrs?
            autoPinCpus: pin hosts to (real) cores (requires CPULimitedHost)?
            listenPort: base listening port to open; will be incremented for
-               each additional switch in the net if inNamespace=False"""
+               each additional switch in the net if inNamespace=False
+           waitConnected: wait for switches to Connect?
+               (False; True/None=wait indefinitely; time(s)=timed wait)"""
         self.topo = topo
         self.switch = switch
         self.host = host
@@ -183,14 +187,16 @@ class Mininet( object ):
             self.build()
 
     def waitConnected( self, timeout=None, delay=.5 ):
-        """wait for each switch to connect to a controller,
-           up to 5 seconds
-           timeout: time to wait, or None to wait indefinitely
+        """wait for each switch to connect to a controller
+           timeout: time to wait, or None or True to wait indefinitely
            delay: seconds to sleep per iteration
            returns: True if all switches are connected"""
         info( '*** Waiting for switches to connect\n' )
-        time = 0
+        time = 0.0
         remaining = list( self.switches )
+        # False: 0s timeout; None: wait forever (preserve 2.2 behavior)
+        if isinstance( timeout, bool ):
+            timeout = None if timeout else 0
         while True:
             for switch in tuple( remaining ):
                 if switch.connected():
@@ -199,7 +205,7 @@ class Mininet( object ):
             if not remaining:
                 info( '\n' )
                 return True
-            if timeout is not None and time > timeout:
+            if timeout is not None and time >= timeout:
                 break
             sleep( delay )
             time += delay
@@ -633,7 +639,7 @@ class Mininet( object ):
                 started.update( { s: s for s in success } )
         info( '\n' )
         if self.waitConn:
-            self.waitConnected()
+            self.waitConnected( self.waitConn )
 
     def stop( self ):
         "Stop the controller(s), switches and hosts"
@@ -952,7 +958,6 @@ class Mininet( object ):
         duration: test duration in seconds (integer)
         returns a single list of measured CPU fractions as floats.
         """
-        cores = int( quietRun( 'nproc' ) )
         pct = cpu * 100
         info( '*** Testing CPU %.0f%% bandwidth limit\n' % pct )
         hosts = self.hosts

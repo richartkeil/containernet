@@ -57,20 +57,25 @@ import pty
 import re
 import signal
 import select
-import docker
 import json
+import docker
 import time
+from distutils.version import StrictVersion
+from re import findall
 from subprocess import Popen, PIPE, check_output
+from sys import exit  # pylint: disable=redefined-builtin
 from time import sleep
 
 from mininet.log import info, error, warn, debug
 from mininet.util import ( quietRun, errRun, errFail, moveIntf, isShellBuiltin,
                            numCores, retry, mountCgroups, BaseString, decode,
-                           encode, Python3, which )
+                           encode, getincrementaldecoder, Python3, which )
 from mininet.moduledeps import moduleDeps, pathCheck, TUN
 from mininet.link import Link, Intf, TCIntf, OVSIntf
-from re import findall
-from distutils.version import StrictVersion
+
+
+# pylint: disable=too-many-arguments
+
 
 class Node( object ):
     """A virtual network node is simply a shell in a network namespace.
@@ -97,9 +102,13 @@ class Node( object ):
         # Stash configuration parameters for future reference
         self.params = params
 
-        self.intfs = {}  # dict of port numbers to interfaces
-        self.ports = {}  # dict of interfaces to port numbers
-                         # replace with Port objects, eventually ?
+        # dict of port numbers to interfacse
+        self.intfs = {}
+
+        # dict of interfaces to port numbers
+        # todo: replace with Port objects, eventually ?
+        self.ports = {}
+
         self.nameToIntf = {}  # dict of interface names to Intfs
 
         # Make pylint happy
@@ -108,6 +117,9 @@ class Node( object ):
                 None, None, None, None, None, None, None, None )
         self.waiting = False
         self.readbuf = ''
+
+        # Incremental decoder for buffered reading
+        self.decoder = getincrementaldecoder()
 
         # Start command interpreter shell
         self.master, self.slave = None, None  # pylint
@@ -240,19 +252,19 @@ class Node( object ):
 
     # Subshell I/O, commands and control
 
-    def read( self, maxbytes=1024 ):
+    def read( self, size=1024 ):
         """Buffered read from node, potentially blocking.
-           maxbytes: maximum number of bytes to return"""
+           size: maximum number of characters to return"""
         count = len( self.readbuf )
-        if count < maxbytes:
-            data = decode( os.read( self.stdout.fileno(), maxbytes - count ) )
-            self.readbuf += data
-        if maxbytes >= len( self.readbuf ):
+        if count < size:
+            data = os.read( self.stdout.fileno(), size - count )
+            self.readbuf += self.decoder.decode( data )
+        if size >= len( self.readbuf ):
             result = self.readbuf
             self.readbuf = ''
         else:
-            result = self.readbuf[ :maxbytes ]
-            self.readbuf = self.readbuf[ maxbytes: ]
+            result = self.readbuf[ :size ]
+            self.readbuf = self.readbuf[ size: ]
         return result
 
     def readline( self ):
@@ -292,6 +304,7 @@ class Node( object ):
            returns: result of poll()"""
         if len( self.readbuf ) == 0:
             return self.pollOut.poll( timeoutms )
+        return None
 
     def sendCmd( self, *args, **kwargs ):
         """Send a command, followed by a command to echo a sentinel,
@@ -400,6 +413,7 @@ class Node( object ):
             return self.waitOutput( verbose )
         else:
             warn( '(%s exited - ignoring cmd%s)\n' % ( self, args ) )
+        return None
 
     def cmdPrint( self, *args):
         """Call cmd and printing its output
@@ -431,9 +445,6 @@ class Node( object ):
             cmd = [ os.environ[ 'SHELL' ], '-c' ] + [ ' '.join( cmd ) ]
         # Attach to our namespace  using mnexec -a
         cmd = defaults.pop( 'mncmd' ) + cmd
-        ### Shell requires a string, not a list!
-        # if defaults.get( 'shell', False ):
-        #     cmd = ' '.join( cmd )
         popen = self._popen( cmd, **defaults )
         return popen
 
@@ -495,6 +506,7 @@ class Node( object ):
         else:
             warn( '*** defaultIntf: warning:', self.name,
                   'has no interfaces\n' )
+        return None
 
     def intf( self, intf=None ):
         """Return our interface object with given string name,
@@ -608,10 +620,10 @@ class Node( object ):
            value may also be list or dict"""
         name, value = list( param.items() )[ 0 ]
         if value is None:
-            return
+            return None
         f = getattr( self, method, None )
         if not f:
-            return
+            return None
         if isinstance( value, list ):
             result = f( *value )
         elif isinstance( value, dict ):
@@ -679,11 +691,12 @@ class Node( object ):
     @classmethod
     def checkSetup( cls ):
         "Make sure our class and superclasses are set up"
-        while cls and not getattr( cls, 'isSetup', True ):
-            cls.setup()
-            cls.isSetup = True
+        clas = cls
+        while clas and not getattr( clas, 'isSetup', True ):
+            clas.setup()
+            clas.isSetup = True
             # Make pylint happy
-            cls = getattr( type( cls ), '__base__', None )
+            clas = getattr( type( clas ), '__base__', None )
 
     @classmethod
     def setup( cls ):
@@ -1410,6 +1423,7 @@ class CPULimitedHost( Host ):
         errFail( 'cgclassify -g cpuset:/%s %s' % (
                  self.name, self.pid ) )
 
+    # pylint: disable=arguments-differ
     def config( self, cpu=-1, cores=None, **params ):
         """cpu: desired overall system CPU fraction
            cores: (real) core(s) this host can run on
@@ -1502,6 +1516,7 @@ class Switch( Node ):
         else:
             error( '*** Error: %s has execed and cannot accept commands' %
                    self.name )
+        return None
 
     def connected( self ):
         "Is the switch connected to a controller? (override this method)"
@@ -1693,6 +1708,7 @@ class OVSSwitch( Switch ):
         if self.batch:
             cmd = ' '.join( str( arg ).strip() for arg in args )
             self.commands.append( cmd )
+            return None
         else:
             return self.cmd( 'ovs-vsctl', *args, **kwargs )
 
@@ -1908,7 +1924,7 @@ class OVSBridge( OVSSwitch ):
         "Are we forwarding yet?"
         if self.stp:
             status = self.dpctl( 'show' )
-            return 'STP_FORWARD' in status and not 'STP_LEARN' in status
+            return 'STP_FORWARD' in status and 'STP_LEARN' not in status
         else:
             return True
 
@@ -1988,10 +2004,12 @@ class Controller( Node ):
        OpenFlow controller."""
 
     def __init__( self, name, inNamespace=False, command='controller',
-                  cargs='-v ptcp:%d', cdir=None, ip="127.0.0.1",
-                  port=6653, protocol='tcp', **params ):
+                  cargs='ptcp:%d', cdir=None, ip="127.0.0.1",
+                  port=6653, protocol='tcp', verbose=False, **params ):
         self.command = command
         self.cargs = cargs
+        if verbose:
+            cargs = '-v ' + cargs
         self.cdir = cdir
         # Accept 'ip:port' syntax as shorthand
         if ':' in ip:
@@ -2033,6 +2051,7 @@ class Controller( Node ):
                   ' 1>' + cout + ' 2>' + cout + ' &' )
         self.execed = False
 
+    # pylint: disable=arguments-differ,signature-differs
     def stop( self, *args, **kwargs ):
         "Stop controller."
         self.cmd( 'kill %' + self.command )
@@ -2083,7 +2102,7 @@ class NOX( Controller ):
             warn( 'warning: no NOX modules specified; '
                   'running packetdump only\n' )
             noxArgs = [ 'packetdump' ]
-        elif type( noxArgs ) not in ( list, tuple ):
+        elif not isinstance( noxArgs, ( list, tuple ) ):
             noxArgs = [ noxArgs ]
 
         if 'NOX_CORE_DIR' not in os.environ:
@@ -2092,32 +2111,26 @@ class NOX( Controller ):
 
         Controller.__init__( self, name,
                              command=noxCoreDir + '/nox_core',
-                             cargs='--libdir=/usr/local/lib -v -i ptcp:%s ' +
+                             cargs='--libdir=/usr/local/lib -v '
+                             '-i ptcp:%s ' +
                              ' '.join( noxArgs ),
                              cdir=noxCoreDir,
                              **kwargs )
 
 class Ryu( Controller ):
-    "Controller to run Ryu application"
-    def __init__( self, name, *ryuArgs, **kwargs ):
+    "Ryu OpenFlow Controller"
+    def __init__( self, name, ryuArgs='ryu.app.simple_switch',
+                  command='ryu run', **kwargs ):
         """Init.
-        name: name to give controller.
-        ryuArgs: arguments and modules to pass to Ryu"""
-        homeDir = quietRun( 'printenv HOME' ).strip( '\r\n' )
-        ryuCoreDir = '%s/ryu/ryu/app/' % homeDir
-        if not ryuArgs:
-            warn( 'warning: no Ryu modules specified; '
-                  'running simple_switch only\n' )
-            ryuArgs = [ ryuCoreDir + 'simple_switch.py' ]
-        elif type( ryuArgs ) not in ( list, tuple ):
-            ryuArgs = [ ryuArgs ]
-
-        Controller.__init__( self, name,
-                             command='ryu-manager',
-                             cargs='--ofp-tcp-listen-port %s ' +
-                             ' '.join( ryuArgs ),
-                             cdir=ryuCoreDir,
-                             **kwargs )
+           name: name to give controller.
+           ryuArgs: modules to pass to Ryu (ryu.app.simple_switch)
+           command: comand to run Ryu ('ryu run')"""
+        if isinstance( ryuArgs, ( list, tuple ) ):
+            ryuArgs = ' '.join( ryuArgs )
+        cargs = kwargs.pop(
+            'cargs', ryuArgs + ' --ofp-tcp-listen-port %s' )
+        Controller.__init__( self, name, command=command,
+                             cargs=cargs, **kwargs )
 
 
 class RemoteController( Controller ):
@@ -2136,6 +2149,7 @@ class RemoteController( Controller ):
         "Overridden to do nothing."
         return
 
+    # pylint: disable=arguments-differ
     def stop( self ):
         "Overridden to do nothing."
         return
@@ -2176,6 +2190,7 @@ def findController( controllers=DefaultControllers ):
     for controller in controllers:
         if controller.isAvailable():
             return controller
+    return None
 
 
 def DefaultController( name, controllers=DefaultControllers, **kwargs ):
