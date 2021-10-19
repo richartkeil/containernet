@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: [ $default-branch ]
 
+
 jobs:
   test:
     name: Run tests on bare metal
