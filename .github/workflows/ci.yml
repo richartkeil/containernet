@@ -1,9 +1,10 @@
 name: CI
 
-on:
+on: 
   push:
+    branches: [ master ]
   pull_request:
-    branches: [ $default-branch ]
+    branches: [ master ] 
 
 jobs:
   test:
